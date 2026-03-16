@@ -1,0 +1,148 @@
+---
+title: "Raster Deepdive"
+author: "Nicola Noger"
+format: html
+editor: visual
+engine: knitr
+---
+
+# Solution for Raster Deepdive
+
+In this document, I solve the tasks for *Raster Deepdive* of the course *Spatiotemporal Datascience*.
+
+## Load libraries and data
+
+```{r}
+library(terra)
+library(dplyr)
+library(tictoc)
+library(readr)
+
+# Start runtime measurement
+tic("Task 1 (Raster Approach) runtime")
+
+data_dir <- "A:/STUDIUM/06_Fruelingssemester26/STDS/Week_3/data"
+
+# Read vector data
+kantone <- vect(file.path(data_dir, "swissBOUNDARIES3D_1_5_LV95_LN02.gpkg"), layer = "tlm_kantonsgebiet")
+wald <- vect(file.path(data_dir,"SWISSTLM3D_2026_LV95_LN02.gpkg"), layer = "tlm_bb_bodenbedeckung")
+
+# Keep forest classes
+wald <- wald[wald$objektart %in% c("Wald", "Wald offen"), ]
+
+
+## Task 1: Raster Approach
+
+# Create a template raster based on the extent of the cantons
+r_template <- rast(kantone, resolution = 100)
+
+# Rasterize cantons: assign the canton name to each pixel
+r_kantone <- rasterize(kantone, r_template, field = "name")
+
+# Rasterize forest: assign 1 to forest pixels, 0 to background
+r_wald <- rasterize(wald, r_template, field = 1, background = 0)
+names(r_wald) <- "wald_pixel_count"
+
+# Count forest pixels per canton using zonal statistics
+wald_pro_kanton <- zonal(r_wald, r_kantone, fun = "sum", na.rm = TRUE)
+
+# Calculate forest area in square meters (1 pixel = 100m * 100m = 10,000 m^2)
+wald_pro_kanton <- wald_pro_kanton |> 
+  mutate(wald_area = wald_pixel_count * 10000)
+
+# Calculate total canton area (using the fast vector method) and join
+kantone$kanton_area <- expanse(kantone)
+
+kanton_frac <- kantone |>
+  as.data.frame() |> 
+  group_by(name) |>
+  summarise(kanton_area = sum(kanton_area)) |>
+  left_join(wald_pro_kanton, by = "name") |> 
+  mutate(wald_frac = as.numeric(wald_area / kanton_area))
+
+# End and log runtime
+terra_time <- tictoc::toc(quiet = TRUE, log = TRUE)
+terra_time <- as.numeric(terra_time$toc - terra_time$tic)
+```
+
+## Forest share by canton (descending)
+
+```{r}
+kanton_frac_sorted <- kanton_frac |>
+  arrange(desc(wald_frac)) |>
+  select(name, wald_frac) |>
+  mutate(wald_frac_pct = round(wald_frac * 100, 2))
+
+knitr::kable(kanton_frac_sorted, 
+             col.names = c("Canton", "Forest share", "Forest share (%)"),
+             digits = 4)
+```
+
+
+```{r}
+tictoc::tic(msg = "Task 2: GDAL - rasterize")
+```
+
+```{bash}
+
+# Set file paths
+# 1. Define paths
+data_dir="A:/STUDIUM/06_Fruelingssemester26/STDS/Week_3/data"
+out_dir="A:/STUDIUM/06_Fruelingssemester26/STDS/Week_3/Raster_deepdive/output"
+kantone_gpkg="${data_dir}/swissBOUNDARIES3D_1_5_LV95_LN02.gpkg"
+wald_gpkg="${data_dir}/SWISSTLM3D_2026_LV95_LN02.gpkg"
+
+# 2. Read extent
+extent=$(ogrinfo -so "${kantone_gpkg}" tlm_kantonsgebiet | grep Extent | tr -d '(),-' | awk '{print $2, $3, $4, $5}')
+
+# 3. Rasterize forest (force NoData=255 so 0 counts as non-forest)
+gdal_rasterize -l tlm_bb_bodenbedeckung -burn 1 -init 0 -a_nodata 255 -ot Byte -tr 50 50 -tap -te ${extent} -where "objektart IN ('Wald', 'Wald offen')" "${wald_gpkg}" "${out_dir}/forest.tif"
+
+# 4. GDAL pipeline (counts all pixels per canton)
+gdal pipeline read "${out_dir}/forest.tif" ! zonal-stats --zones "${kantone_gpkg}" --zones-layer tlm_kantonsgebiet --stat count --stat sum --include-field name ! write --output-format CSV "${out_dir}/zonal_stats.csv"
+```
+
+```{r}
+gdal_time <- tictoc::toc(quiet = TRUE, log = TRUE)
+
+```
+
+```{r}
+gdal_results <- read_csv("A:/STUDIUM/06_Fruelingssemester26/STDS/Week_3/Raster_deepdive/output/zonal_stats.csv")
+
+# Calculate forest share (sum / count)
+kanton_frac_gdal_sorted <- gdal_results |>
+  mutate(wald_frac = sum / count) |>
+  arrange(desc(wald_frac)) |>
+  select(name, wald_frac) |>
+  mutate(wald_frac_pct = round(wald_frac * 100, 2))
+# Show results
+knitr::kable(kanton_frac_gdal_sorted, 
+             col.names = c("Canton", "Forest share", "Forest share (%)"),
+             digits = 4)
+```
+
+
+## Runtime comparison
+
+```{r}
+
+terra_sec <- as.numeric(terra_time$toc - terra_time$tic)
+
+gdal_sec <- as.numeric(gdal_time$toc - gdal_time$tic)
+
+timings <- data.frame(
+  Method = c("sf (Vector Deepdive)", "DuckDB (Vector Deepdive)", "Terra (Raster Task 1)", "GDAL (Task 2)"),
+  Time_seconds = c(208.30, 123.14, terra_sec, gdal_sec)
+)
+
+knitr::kable(timings, digits = 2)
+```
+
+## Results
+
+The raster approaches with `terra` and GDAL produce the same forest shares as the vector computations (sf/DuckDB). The canton order and percentages are consistent, so the results are methodologically identical.
+
+## Discussion
+
+Raster processing was much faster than the vector calculations because the raster data are smaller here and the evaluation is essentially a simple pixel count. The repeated OOM issues with `terra` were unexpected and even crashed my device, which suggests high memory demand during rasterization or intermediate steps despite the smaller data footprint. Overall, the comparison confirms that raster is more efficient here, but `terra` was unstable in my setup.
