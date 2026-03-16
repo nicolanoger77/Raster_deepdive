@@ -18,6 +18,19 @@ library(dplyr)
 library(tictoc)
 library(readr)
 
+# Ensure knitr can find Git Bash on Windows
+bash_path <- Sys.which("bash")
+if (bash_path == "") {
+  bash_candidates <- c(
+    "C:/Program Files/Git/usr/bin/bash.exe",
+    "C:/Program Files/Git/bin/bash.exe"
+  )
+  bash_path <- bash_candidates[file.exists(bash_candidates)][1]
+}
+if (!is.na(bash_path) && bash_path != "") {
+  knitr::opts_chunk$set(engine.path = list(bash = bash_path))
+}
+
 # Start runtime measurement
 tic("Task 1 (Raster Approach) runtime")
 
@@ -92,14 +105,21 @@ out_dir="A:/STUDIUM/06_Fruelingssemester26/STDS/Week_3/Raster_deepdive/output"
 kantone_gpkg="${data_dir}/swissBOUNDARIES3D_1_5_LV95_LN02.gpkg"
 wald_gpkg="${data_dir}/SWISSTLM3D_2026_LV95_LN02.gpkg"
 
+# Ensure Git Bash coreutils and conda are available
+export PATH="/usr/bin:/bin:$PATH"
+CONDA="/c/Users/Nicola/anaconda3/Scripts/conda.exe"
+if [ ! -x "$CONDA" ]; then
+  CONDA="/c/Users/Nicola/Anaconda3/Scripts/conda.exe"
+fi
+
 # 2. Read extent
-extent=$(ogrinfo -so "${kantone_gpkg}" tlm_kantonsgebiet | grep Extent | tr -d '(),-' | awk '{print $2, $3, $4, $5}')
+extent=$($CONDA run -n geo_gdal ogrinfo -so "${kantone_gpkg}" tlm_kantonsgebiet | grep Extent | tr -d '(),-' | awk '{print $2, $3, $4, $5}')
 
 # 3. Rasterize forest (force NoData=255 so 0 counts as non-forest)
-gdal_rasterize -l tlm_bb_bodenbedeckung -burn 1 -init 0 -a_nodata 255 -ot Byte -tr 50 50 -tap -te ${extent} -where "objektart IN ('Wald', 'Wald offen')" "${wald_gpkg}" "${out_dir}/forest.tif"
+$CONDA run -n geo_gdal gdal_rasterize -l tlm_bb_bodenbedeckung -burn 1 -init 0 -a_nodata 255 -ot Byte -tr 50 50 -tap -te ${extent} -where "objektart IN ('Wald', 'Wald offen')" "${wald_gpkg}" "${out_dir}/forest.tif"
 
 # 4. GDAL pipeline (counts all pixels per canton)
-gdal pipeline read "${out_dir}/forest.tif" ! zonal-stats --zones "${kantone_gpkg}" --zones-layer tlm_kantonsgebiet --stat count --stat sum --include-field name ! write --output-format CSV "${out_dir}/zonal_stats.csv"
+$CONDA run -n geo_gdal gdal pipeline read "${out_dir}/forest.tif" ! zonal-stats --zones "${kantone_gpkg}" --zones-layer tlm_kantonsgebiet --stat count --stat sum --include-field name ! write --overwrite --output-format CSV "${out_dir}/zonal_stats.csv"
 ```
 
 ```{r}
@@ -127,7 +147,7 @@ knitr::kable(kanton_frac_gdal_sorted,
 
 ```{r}
 
-terra_sec <- as.numeric(terra_time$toc - terra_time$tic)
+terra_sec <- as.numeric(terra_time)
 
 gdal_sec <- as.numeric(gdal_time$toc - gdal_time$tic)
 
@@ -146,3 +166,7 @@ The raster approaches with `terra` and GDAL produce the same forest shares as th
 ## Discussion
 
 Raster processing was much faster than the vector calculations because the raster data are smaller here and the evaluation is essentially a simple pixel count. The repeated OOM issues with `terra` were unexpected and even crashed my device, which suggests high memory demand during rasterization or intermediate steps despite the smaller data footprint. Overall, the comparison confirms that raster is more efficient here, but `terra` was unstable in my setup.
+
+## Use of AI
+
+AI tools (GitHub Copilot) were used in this exercise to assist with writing and debugging R code, as well as for proofreading and improving text.
